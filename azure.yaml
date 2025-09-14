@@ -1,0 +1,16 @@
+# Azure Developer CLI configuration for demo-gh-copilot-pr
+name: demo-gh-copilot-pr
+metadata:
+  template: custom
+services:
+  acr:
+    project: ../infra/modules/acr.bicep
+    resourceType: containerRegistry
+  appServicePlan:
+    project: ../infra/modules/app-service.bicep
+    resourceType: appServicePlan
+  appService:
+    project: ../infra/modules/app-service.bicep
+    resourceType: appService
+
+# You can add environments, hooks, and pipeline config as needed

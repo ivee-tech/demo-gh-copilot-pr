@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "location": {
+      "value": "australiaeast"
+    },
+    "acrName": {
+      "value": "crghcopilotdev001"
+    },
+    "acrSku": {
+      "value": "Basic"
+    },
+    "imageName": {
+        "value": "dotnet/samples"
+    },
+    "imageTag": {
+        "value": "aspnetapp"
+    },
+    "appServicePlanName": {
+      "value": "asp-ghcopilot-dev-001"
+    },
+    "webAppName": {
+      "value": "app-ghcopilot-dev-001"
+    },
+    "appKind": {
+      "value": "app,linux,container"
+    }
+  }
+}
