@@ -1,0 +1,232 @@
+name: Deploy Application Revision
+
+on:
+  workflow_run:
+    workflows: ["Build and Push Container Image"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      image_tag:
+        description: 'Container image tag to deploy'
+        required: true
+        default: 'latest'
+      force_deploy:
+        description: 'Force deployment even if no changes detected'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # Only run if the build workflow succeeded or if manually triggered
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+    
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set environment variables
+      run: |
+        ENV_NAME=${{ github.event.inputs.environment || 'dev' }}
+        echo "ENVIRONMENT=$ENV_NAME" >> $GITHUB_ENV
+        echo "RESOURCE_GROUP_NAME=rg-ghcopilot-$ENV_NAME-001" >> $GITHUB_ENV
+        echo "CONTAINER_APP_NAME=ca-ghcopilot-$ENV_NAME-001" >> $GITHUB_ENV
+        echo "ACR_NAME=crghcopilotdev001" >> $GITHUB_ENV
+        
+        # Determine image tag
+        if [ -n "${{ github.event.inputs.image_tag }}" ]; then
+          echo "IMAGE_TAG=${{ github.event.inputs.image_tag }}" >> $GITHUB_ENV
+        else
+          # Use the latest build tag from the triggering workflow
+          echo "IMAGE_TAG=main-$(echo ${{ github.sha }} | cut -c1-7)" >> $GITHUB_ENV
+        fi
+
+    - name: Log in to Azure
+      uses: azure/login@v2
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    - name: Check if container image exists
+      id: check-image
+      run: |
+        IMAGE_EXISTS=$(az acr repository show-tags \
+          --name ${{ env.ACR_NAME }} \
+          --repository planets-app \
+          --query "contains(@, '${{ env.IMAGE_TAG }}')" \
+          --output tsv)
+        
+        if [ "$IMAGE_EXISTS" != "true" ]; then
+          echo "❌ Image planets-app:${{ env.IMAGE_TAG }} not found in registry"
+          echo "Available tags:"
+          az acr repository show-tags --name ${{ env.ACR_NAME }} --repository planets-app --output table
+          exit 1
+        else
+          echo "✅ Image planets-app:${{ env.IMAGE_TAG }} found in registry"
+        fi
+
+    - name: Get current revision info
+      id: current-revision
+      run: |
+        CURRENT_IMAGE=$(az containerapp show \
+          --name ${{ env.CONTAINER_APP_NAME }} \
+          --resource-group ${{ env.RESOURCE_GROUP_NAME }} \
+          --query 'properties.template.containers[0].image' \
+          --output tsv 2>/dev/null || echo "")
+        
+        echo "current-image=$CURRENT_IMAGE" >> $GITHUB_OUTPUT
+        
+        if [ -n "$CURRENT_IMAGE" ]; then
+          echo "Current image: $CURRENT_IMAGE"
+          CURRENT_TAG=$(echo "$CURRENT_IMAGE" | cut -d':' -f2)
+          echo "current-tag=$CURRENT_TAG" >> $GITHUB_OUTPUT
+        else
+          echo "No current container app found or failed to get current image"
+          echo "current-tag=" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Check if deployment is needed
+      id: check-deploy
+      run: |
+        FORCE_DEPLOY=${{ github.event.inputs.force_deploy || 'false' }}
+        CURRENT_TAG="${{ steps.current-revision.outputs.current-tag }}"
+        NEW_TAG="${{ env.IMAGE_TAG }}"
+        
+        if [ "$FORCE_DEPLOY" = "true" ]; then
+          echo "Force deployment requested"
+          echo "deploy-needed=true" >> $GITHUB_OUTPUT
+        elif [ "$CURRENT_TAG" != "$NEW_TAG" ]; then
+          echo "Image tag changed from '$CURRENT_TAG' to '$NEW_TAG'"
+          echo "deploy-needed=true" >> $GITHUB_OUTPUT
+        else
+          echo "No deployment needed - image tag unchanged: $CURRENT_TAG"
+          echo "deploy-needed=false" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Update Container App parameters
+      if: steps.check-deploy.outputs.deploy-needed == 'true'
+      run: |
+        # Create parameters file with updated image tag
+        PARAMS_FILE="./infra/${{ env.ENVIRONMENT }}.ca.parameters.jsonc"
+        TEMP_PARAMS_FILE="./infra/${{ env.ENVIRONMENT }}.ca.parameters.temp.jsonc"
+        
+        jq --arg tag "${{ env.IMAGE_TAG }}" \
+          '.parameters.imageTag.value = $tag' \
+          "$PARAMS_FILE" > "$TEMP_PARAMS_FILE"
+        
+        echo "Updated parameters file with image tag: ${{ env.IMAGE_TAG }}"
+
+    - name: Deploy new Container App revision
+      if: steps.check-deploy.outputs.deploy-needed == 'true'
+      run: |
+        echo "🚀 Deploying new revision with image: ${{ env.ACR_NAME }}.azurecr.io/planets-app:${{ env.IMAGE_TAG }}"
+        
+        az deployment group create \
+          --resource-group ${{ env.RESOURCE_GROUP_NAME }} \
+          --template-file ./infra/deploy-ca.bicep \
+          --parameters "@./infra/${{ env.ENVIRONMENT }}.ca.parameters.temp.jsonc" \
+          --name ca-revision-${{ github.run_number }} \
+          --no-wait
+
+    - name: Wait for deployment completion
+      if: steps.check-deploy.outputs.deploy-needed == 'true'
+      run: |
+        echo "Waiting for deployment to complete..."
+        az deployment group wait \
+          --resource-group ${{ env.RESOURCE_GROUP_NAME }} \
+          --name ca-revision-${{ github.run_number }} \
+          --created
+
+    - name: Verify deployment
+      if: steps.check-deploy.outputs.deploy-needed == 'true'
+      run: |
+        # Get the new image info
+        NEW_IMAGE=$(az containerapp show \
+          --name ${{ env.CONTAINER_APP_NAME }} \
+          --resource-group ${{ env.RESOURCE_GROUP_NAME }} \
+          --query 'properties.template.containers[0].image' \
+          --output tsv)
+        
+        echo "Deployed image: $NEW_IMAGE"
+        
+        # Get the container app URL
+        APP_URL=$(az containerapp show \
+          --name ${{ env.CONTAINER_APP_NAME }} \
+          --resource-group ${{ env.RESOURCE_GROUP_NAME }} \
+          --query 'properties.configuration.ingress.fqdn' \
+          --output tsv)
+        
+        if [ -n "$APP_URL" ]; then
+          echo "APP_URL=https://$APP_URL" >> $GITHUB_ENV
+          echo "Application URL: https://$APP_URL"
+        fi
+
+    - name: Health check
+      if: steps.check-deploy.outputs.deploy-needed == 'true' && env.APP_URL
+      run: |
+        echo "Performing health check..."
+        MAX_ATTEMPTS=10
+        ATTEMPT=1
+        
+        while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+          echo "Health check attempt $ATTEMPT/$MAX_ATTEMPTS"
+          
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${{ env.APP_URL }}" || echo "000")
+          
+          if [ "$HTTP_STATUS" = "200" ]; then
+            echo "✅ Health check passed - HTTP $HTTP_STATUS"
+            break
+          else
+            echo "⚠️ Health check failed - HTTP $HTTP_STATUS"
+            if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
+              echo "❌ Health check failed after $MAX_ATTEMPTS attempts"
+              exit 1
+            fi
+            sleep 30
+          fi
+          
+          ATTEMPT=$((ATTEMPT + 1))
+        done
+
+    - name: Generate deployment summary
+      run: |
+        echo "### 🚀 Application Deployment Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [ "${{ steps.check-deploy.outputs.deploy-needed }}" = "true" ]; then
+          echo "**Status:** ✅ New revision deployed successfully" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** \`${{ env.ENVIRONMENT }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Image Tag:** \`${{ env.IMAGE_TAG }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Container App:** \`${{ env.CONTAINER_APP_NAME }}\`" >> $GITHUB_STEP_SUMMARY
+          
+          if [ -n "${{ env.APP_URL }}" ]; then
+            echo "**Application URL:** [${{ env.APP_URL }}](${{ env.APP_URL }})" >> $GITHUB_STEP_SUMMARY
+          fi
+        else
+          echo "**Status:** ⏭️ No deployment needed" >> $GITHUB_STEP_SUMMARY
+          echo "**Reason:** Image tag unchanged (\`${{ steps.current-revision.outputs.current-tag }}\`)" >> $GITHUB_STEP_SUMMARY
+        fi
+
+    - name: Clean up temporary files
+      if: always()
+      run: |
+        rm -f "./infra/${{ env.ENVIRONMENT }}.ca.parameters.temp.jsonc"

@@ -1,0 +1,112 @@
+name: Build and Push Container Image
+
+on:
+  # push:
+  #   branches: [main, develop]
+  #   paths:
+  #     - 'planets/**'
+  # pull_request:
+  #   branches: [main]
+  #   paths:
+  #     - 'planets/**'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Custom image tag'
+        required: false
+        default: ''
+
+env:
+  REGISTRY: crghcopilotdev001.azurecr.io
+  IMAGE_NAME: planets-app
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      image-digest: ${{ steps.build.outputs.digest }}
+      image-version: ${{ steps.version.outputs.version }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to Azure
+      uses: azure/login@v2
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    - name: Log in to Azure Container Registry
+      run: |
+        az acr login --name $(echo ${{ env.REGISTRY }} | cut -d'.' -f1)
+
+    - name: Generate version
+      id: version
+      run: |
+        if [ -n "${{ github.event.inputs.tag }}" ]; then
+          VERSION="${{ github.event.inputs.tag }}"
+        else
+          # Generate version from branch and short SHA
+          BRANCH=$(echo "${{ github.ref_name }}" | sed 's/[^a-zA-Z0-9.-]/-/g')
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          VERSION="${BRANCH}-${SHORT_SHA}"
+        fi
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "Generated version: $VERSION"
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=raw,value=${{ steps.version.outputs.version }}
+          type=ref,event=branch
+          type=ref,event=pr
+          type=raw,value=latest,enable={{is_default_branch}}
+        labels: |
+          org.opencontainers.image.title=Planets App
+          org.opencontainers.image.description=A Three.js solar system visualization
+          org.opencontainers.image.vendor=GitHub Copilot Demo
+
+    - name: Build and push Docker image
+      id: build
+      uses: docker/build-push-action@v5
+      with:
+        context: ./planets
+        file: ./planets/Dockerfile
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        platforms: linux/amd64
+
+    - name: Generate build summary
+      run: |
+        echo "### 🐳 Container Build Complete!" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Image:** \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "**Tags:**" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+        echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+        echo "**Digest:** \`${{ steps.build.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
+
+    - name: Scan image for vulnerabilities
+      continue-on-error: true
+      run: |
+        # Install Docker Scout (if not already available)
+        curl -fsSL https://raw.githubusercontent.com/docker/scout-cli/main/install.sh | sh
+        
+        # Run vulnerability scan
+        docker scout cves ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }} || echo "Scout scan failed or vulnerabilities found"

@@ -1,0 +1,247 @@
+name: Deploy Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      validate_only:
+        description: 'Run validation only (What-If analysis)'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+jobs:
+  deploy-infrastructure:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set environment variables
+      run: |
+        ENV=${{ github.event.inputs.environment }}
+        echo "ENVIRONMENT=$ENV" >> $GITHUB_ENV
+        echo "RESOURCE_GROUP=rg-ghcopilot-$ENV-001" >> $GITHUB_ENV
+        echo "LOCATION=australiaeast" >> $GITHUB_ENV
+
+    - name: Log in to Azure
+      uses: azure/login@v2
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    - name: Validate parameter files
+      run: |
+        echo "Validating parameter files for environment: ${{ env.ENVIRONMENT }}"
+        
+        # Check if parameter files exist
+        PARAM_FILES=(
+          "./infra/${{ env.ENVIRONMENT }}.identity.parameters.jsonc"
+          "./infra/${{ env.ENVIRONMENT }}.acr.parameters.jsonc"
+          "./infra/${{ env.ENVIRONMENT }}.cae.parameters.jsonc"
+          "./infra/${{ env.ENVIRONMENT }}.ca.parameters.jsonc"
+        )
+        
+        for file in "${PARAM_FILES[@]}"; do
+          if [ ! -f "$file" ]; then
+            echo "❌ Parameter file not found: $file"
+            exit 1
+          else
+            echo "✅ Found parameter file: $file"
+          fi
+        done
+
+    - name: Create or update Resource Group
+      run: |
+        echo "Creating/updating resource group: ${{ env.RESOURCE_GROUP }}"
+        az group create \
+          --name ${{ env.RESOURCE_GROUP }} \
+          --location ${{ env.LOCATION }} \
+          --tags \
+            environment=${{ env.ENVIRONMENT }} \
+            project=ghcopilot-demo \
+            managed-by=github-actions \
+            created-date=$(date -u +%Y-%m-%d)
+
+    - name: Deploy User Assigned Identity
+      run: |
+        echo "🔐 Deploying User Assigned Identity..."
+        
+        if [ "${{ github.event.inputs.validate_only }}" = "true" ]; then
+          echo "Running What-If analysis for Identity..."
+          az deployment group what-if \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --template-file ./infra/deploy-identity.bicep \
+            --parameters @./infra/${{ env.ENVIRONMENT }}.identity.parameters.jsonc
+        else
+          echo "Deploying Identity..."
+          az deployment group create \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --template-file ./infra/deploy-identity.bicep \
+            --parameters @./infra/${{ env.ENVIRONMENT }}.identity.parameters.jsonc \
+            --name identity-deployment-${{ github.run_number }}
+          
+          # Verify deployment
+          IDENTITY_NAME=$(jq -r '.parameters.userAssignedIdentityName.value' ./infra/${{ env.ENVIRONMENT }}.identity.parameters.jsonc)
+          az identity show \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --name $IDENTITY_NAME \
+            --query '{name:name, principalId:principalId, clientId:clientId}' \
+            --output table
+        fi
+
+    - name: Deploy Azure Container Registry
+      run: |
+        echo "🐳 Deploying Azure Container Registry..."
+        
+        if [ "${{ github.event.inputs.validate_only }}" = "true" ]; then
+          echo "Running What-If analysis for ACR..."
+          az deployment group what-if \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --template-file ./infra/deploy-acr.bicep \
+            --parameters @./infra/${{ env.ENVIRONMENT }}.acr.parameters.jsonc
+        else
+          echo "Deploying ACR..."
+          az deployment group create \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --template-file ./infra/deploy-acr.bicep \
+            --parameters @./infra/${{ env.ENVIRONMENT }}.acr.parameters.jsonc \
+            --name acr-deployment-${{ github.run_number }}
+          
+          # Verify deployment
+          ACR_NAME=$(jq -r '.parameters.acrName.value' ./infra/${{ env.ENVIRONMENT }}.acr.parameters.jsonc)
+          az acr show \
+            --name $ACR_NAME \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --query '{name:name, location:location, sku:sku.name, loginServer:loginServer}' \
+            --output table
+        fi
+
+    - name: Configure Container Registry RBAC
+      if: github.event.inputs.validate_only != 'true'
+      run: |
+        echo "🔑 Configuring RBAC for Container Registry..."
+        
+        # Get names from parameter files
+        IDENTITY_NAME=$(jq -r '.parameters.userAssignedIdentityName.value' ./infra/${{ env.ENVIRONMENT }}.identity.parameters.jsonc)
+        ACR_NAME=$(jq -r '.parameters.acrName.value' ./infra/${{ env.ENVIRONMENT }}.acr.parameters.jsonc)
+        
+        # Get identity principal ID
+        IDENTITY_PRINCIPAL_ID=$(az identity show \
+          --resource-group ${{ env.RESOURCE_GROUP }} \
+          --name $IDENTITY_NAME \
+          --query 'principalId' \
+          --output tsv)
+        
+        # Get ACR resource ID
+        ACR_RESOURCE_ID=$(az acr show \
+          --name $ACR_NAME \
+          --resource-group ${{ env.RESOURCE_GROUP }} \
+          --query 'id' \
+          --output tsv)
+        
+        # Assign AcrPull role
+        az role assignment create \
+          --assignee $IDENTITY_PRINCIPAL_ID \
+          --role "AcrPull" \
+          --scope $ACR_RESOURCE_ID \
+          --description "Allow container app to pull images"
+        
+        echo "✅ Assigned AcrPull role to identity: $IDENTITY_NAME"
+
+    - name: Deploy Container App Environment
+      run: |
+        echo "🏗️ Deploying Container App Environment..."
+        
+        if [ "${{ github.event.inputs.validate_only }}" = "true" ]; then
+          echo "Running What-If analysis for Container App Environment..."
+          az deployment group what-if \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --template-file ./infra/deploy-cae.bicep \
+            --parameters @./infra/${{ env.ENVIRONMENT }}.cae.parameters.jsonc
+        else
+          echo "Deploying Container App Environment..."
+          az deployment group create \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --template-file ./infra/deploy-cae.bicep \
+            --parameters @./infra/${{ env.ENVIRONMENT }}.cae.parameters.jsonc \
+            --name cae-deployment-${{ github.run_number }}
+          
+          # Verify deployment
+          CAE_NAME=$(jq -r '.parameters.envName.value' ./infra/${{ env.ENVIRONMENT }}.cae.parameters.jsonc)
+          az containerapp env show \
+            --name $CAE_NAME \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --query '{name:name, location:location, provisioningState:properties.provisioningState}' \
+            --output table
+        fi
+
+    - name: Generate infrastructure summary
+      run: |
+        echo "### 🏗️ Infrastructure Deployment Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Environment:** \`${{ env.ENVIRONMENT }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "**Resource Group:** \`${{ env.RESOURCE_GROUP }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "**Location:** \`${{ env.LOCATION }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [ "${{ github.event.inputs.validate_only }}" = "true" ]; then
+          echo "**Mode:** 🔍 Validation Only (What-If Analysis)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ All templates validated successfully" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "**Mode:** 🚀 Full Deployment" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Get deployed resources info
+          IDENTITY_NAME=$(jq -r '.parameters.userAssignedIdentityName.value' ./infra/${{ env.ENVIRONMENT }}.identity.parameters.jsonc)
+          ACR_NAME=$(jq -r '.parameters.acrName.value' ./infra/${{ env.ENVIRONMENT }}.acr.parameters.jsonc)
+          CAE_NAME=$(jq -r '.parameters.envName.value' ./infra/${{ env.ENVIRONMENT }}.cae.parameters.jsonc)
+          
+          echo "**Deployed Resources:**" >> $GITHUB_STEP_SUMMARY
+          echo "- 🔐 User Assigned Identity: \`$IDENTITY_NAME\`" >> $GITHUB_STEP_SUMMARY
+          echo "- 🐳 Container Registry: \`$ACR_NAME\`" >> $GITHUB_STEP_SUMMARY
+          echo "- 🏗️ Container App Environment: \`$CAE_NAME\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Infrastructure ready for application deployment" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "---" >> $GITHUB_STEP_SUMMARY
+        echo "*Deployment completed at $(date -u)*" >> $GITHUB_STEP_SUMMARY
+
+    - name: Output deployment information
+      if: github.event.inputs.validate_only != 'true'
+      run: |
+        echo "=== DEPLOYMENT OUTPUTS ==="
+        echo "Resource Group: ${{ env.RESOURCE_GROUP }}"
+        echo "Environment: ${{ env.ENVIRONMENT }}"
+        
+        # Output key resource information
+        IDENTITY_NAME=$(jq -r '.parameters.userAssignedIdentityName.value' ./infra/${{ env.ENVIRONMENT }}.identity.parameters.jsonc)
+        ACR_NAME=$(jq -r '.parameters.acrName.value' ./infra/${{ env.ENVIRONMENT }}.acr.parameters.jsonc)
+        CAE_NAME=$(jq -r '.parameters.envName.value' ./infra/${{ env.ENVIRONMENT }}.cae.parameters.jsonc)
+        
+        echo "Identity Name: $IDENTITY_NAME"
+        echo "ACR Name: $ACR_NAME"
+        echo "Container App Environment: $CAE_NAME"
+        
+        # Get ACR login server
+        ACR_LOGIN_SERVER=$(az acr show --name $ACR_NAME --resource-group ${{ env.RESOURCE_GROUP }} --query 'loginServer' --output tsv)
+        echo "ACR Login Server: $ACR_LOGIN_SERVER"

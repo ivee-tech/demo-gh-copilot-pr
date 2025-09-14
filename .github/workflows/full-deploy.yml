@@ -1,0 +1,336 @@
+name: Full Deployment Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      skip_infrastructure:
+        description: 'Skip infrastructure deployment'
+        required: false
+        default: false
+        type: boolean
+      custom_image_tag:
+        description: 'Custom image tag (leave empty to build new image)'
+        required: false
+        default: ''
+
+env:
+  AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+jobs:
+  # Job 1: Build container image (if needed)
+  build-container:
+    runs-on: ubuntu-latest
+    if: ${{ !github.event.inputs.custom_image_tag }}
+    outputs:
+      image-tag: ${{ steps.extract-tag.outputs.tag }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Trigger container build
+      uses: ./.github/workflows/build-container.yml
+      with:
+        tag: ${{ github.event.inputs.environment }}-${{ github.run_number }}
+
+    - name: Extract image tag
+      id: extract-tag
+      run: |
+        TAG="${{ github.event.inputs.environment }}-${{ github.run_number }}"
+        echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+  # Job 2: Deploy infrastructure
+  deploy-infrastructure:
+    runs-on: ubuntu-latest
+    if: ${{ !github.event.inputs.skip_infrastructure }}
+    outputs:
+      resource-group: ${{ steps.set-vars.outputs.resource-group }}
+      acr-name: ${{ steps.set-vars.outputs.acr-name }}
+      ca-name: ${{ steps.set-vars.outputs.ca-name }}
+      cae-name: ${{ steps.set-vars.outputs.cae-name }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set variables
+      id: set-vars
+      run: |
+        ENV=${{ github.event.inputs.environment }}
+        echo "resource-group=rg-ghcopilot-$ENV-001" >> $GITHUB_OUTPUT
+        echo "acr-name=crghcopilot${ENV}001" >> $GITHUB_OUTPUT
+        echo "ca-name=ca-ghcopilot-$ENV-001" >> $GITHUB_OUTPUT
+        echo "cae-name=cae-ghcopilot-$ENV-001" >> $GITHUB_OUTPUT
+        
+        echo "RESOURCE_GROUP=rg-ghcopilot-$ENV-001" >> $GITHUB_ENV
+        echo "LOCATION=australiaeast" >> $GITHUB_ENV
+
+    - name: Log in to Azure
+      uses: azure/login@v2
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    - name: Create Resource Group
+      run: |
+        echo "Creating resource group: ${{ env.RESOURCE_GROUP }}"
+        az group create \
+          --name ${{ env.RESOURCE_GROUP }} \
+          --location ${{ env.LOCATION }} \
+          --tags environment=${{ github.event.inputs.environment }} project=ghcopilot-demo
+
+    - name: Deploy Infrastructure with What-If Analysis
+      run: |
+        echo "Running What-If analysis for infrastructure deployment..."
+        
+        # Deploy User Assigned Identity
+        echo "Validating Identity deployment..."
+        az deployment group what-if \
+          --resource-group ${{ env.RESOURCE_GROUP }} \
+          --template-file ./infra/deploy-identity.bicep \
+          --parameters @./infra/${{ github.event.inputs.environment }}.identity.parameters.jsonc
+        
+        echo "Deploying Identity..."
+        az deployment group create \
+          --resource-group ${{ env.RESOURCE_GROUP }} \
+          --template-file ./infra/deploy-identity.bicep \
+          --parameters @./infra/${{ github.event.inputs.environment }}.identity.parameters.jsonc \
+          --name identity-deployment-${{ github.run_number }}
+
+        # Deploy ACR
+        echo "Validating ACR deployment..."
+        az deployment group what-if \
+          --resource-group ${{ env.RESOURCE_GROUP }} \
+          --template-file ./infra/deploy-acr.bicep \
+          --parameters @./infra/${{ github.event.inputs.environment }}.acr.parameters.jsonc
+        
+        echo "Deploying ACR..."
+        az deployment group create \
+          --resource-group ${{ env.RESOURCE_GROUP }} \
+          --template-file ./infra/deploy-acr.bicep \
+          --parameters @./infra/${{ github.event.inputs.environment }}.acr.parameters.jsonc \
+          --name acr-deployment-${{ github.run_number }}
+
+        # Deploy Container App Environment
+        echo "Validating Container App Environment deployment..."
+        az deployment group what-if \
+          --resource-group ${{ env.RESOURCE_GROUP }} \
+          --template-file ./infra/deploy-cae.bicep \
+          --parameters @./infra/${{ github.event.inputs.environment }}.cae.parameters.jsonc
+        
+        echo "Deploying Container App Environment..."
+        az deployment group create \
+          --resource-group ${{ env.RESOURCE_GROUP }} \
+          --template-file ./infra/deploy-cae.bicep \
+          --parameters @./infra/${{ github.event.inputs.environment }}.cae.parameters.jsonc \
+          --name cae-deployment-${{ github.run_number }}
+
+    - name: Configure RBAC for Container Registry
+      run: |
+        # Get identity details
+        IDENTITY_NAME=$(jq -r '.parameters.userAssignedIdentityName.value' ./infra/${{ github.event.inputs.environment }}.identity.parameters.jsonc)
+        ACR_NAME=$(jq -r '.parameters.acrName.value' ./infra/${{ github.event.inputs.environment }}.acr.parameters.jsonc)
+        
+        IDENTITY_PRINCIPAL_ID=$(az identity show \
+          --resource-group ${{ env.RESOURCE_GROUP }} \
+          --name $IDENTITY_NAME \
+          --query 'principalId' \
+          --output tsv)
+        
+        ACR_RESOURCE_ID=$(az acr show \
+          --name $ACR_NAME \
+          --resource-group ${{ env.RESOURCE_GROUP }} \
+          --query 'id' \
+          --output tsv)
+        
+        # Assign AcrPull role to the managed identity
+        az role assignment create \
+          --assignee $IDENTITY_PRINCIPAL_ID \
+          --role "AcrPull" \
+          --scope $ACR_RESOURCE_ID
+        
+        echo "RBAC configured: $IDENTITY_NAME -> AcrPull -> $ACR_NAME"
+
+  # Job 3: Deploy application
+  deploy-application:
+    runs-on: ubuntu-latest
+    needs: [deploy-infrastructure]
+    # Run if infrastructure deployment completed or was skipped, and either build completed or custom tag provided
+    if: |
+      always() &&
+      (needs.deploy-infrastructure.result == 'success' || github.event.inputs.skip_infrastructure == 'true') &&
+      (needs.build-container.result == 'success' || github.event.inputs.custom_image_tag)
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set variables
+      id: set-vars
+      run: |
+        ENV=${{ github.event.inputs.environment }}
+        echo "RESOURCE_GROUP=rg-ghcopilot-$ENV-001" >> $GITHUB_ENV
+        echo "CONTAINER_APP_NAME=ca-ghcopilot-$ENV-001" >> $GITHUB_ENV
+        
+        # Determine image tag to use
+        if [ -n "${{ github.event.inputs.custom_image_tag }}" ]; then
+          IMAGE_TAG="${{ github.event.inputs.custom_image_tag }}"
+        elif [ -n "${{ needs.build-container.outputs.image-tag }}" ]; then
+          IMAGE_TAG="${{ needs.build-container.outputs.image-tag }}"
+        else
+          IMAGE_TAG="latest"
+        fi
+        
+        echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
+        echo "Using image tag: $IMAGE_TAG"
+
+    - name: Log in to Azure
+      uses: azure/login@v2
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    - name: Update Container App parameters
+      run: |
+        PARAMS_FILE="./infra/${{ github.event.inputs.environment }}.ca.parameters.jsonc"
+        TEMP_PARAMS_FILE="./infra/${{ github.event.inputs.environment }}.ca.parameters.temp.jsonc"
+        
+        jq --arg tag "${{ env.IMAGE_TAG }}" \
+          '.parameters.imageTag.value = $tag' \
+          "$PARAMS_FILE" > "$TEMP_PARAMS_FILE"
+        
+        echo "Updated Container App parameters with image tag: ${{ env.IMAGE_TAG }}"
+
+    - name: Deploy Container App with What-If Analysis
+      run: |
+        echo "Running What-If analysis for Container App deployment..."
+        az deployment group what-if \
+          --resource-group ${{ env.RESOURCE_GROUP }} \
+          --template-file ./infra/deploy-ca.bicep \
+          --parameters "@./infra/${{ github.event.inputs.environment }}.ca.parameters.temp.jsonc"
+        
+        echo "Deploying Container App..."
+        az deployment group create \
+          --resource-group ${{ env.RESOURCE_GROUP }} \
+          --template-file ./infra/deploy-ca.bicep \
+          --parameters "@./infra/${{ github.event.inputs.environment }}.ca.parameters.temp.jsonc" \
+          --name ca-deployment-${{ github.run_number }}
+
+    - name: Get deployment outputs
+      id: outputs
+      run: |
+        # Get Container App URL
+        APP_FQDN=$(az containerapp show \
+          --name ${{ env.CONTAINER_APP_NAME }} \
+          --resource-group ${{ env.RESOURCE_GROUP }} \
+          --query 'properties.configuration.ingress.fqdn' \
+          --output tsv 2>/dev/null || echo "")
+        
+        if [ -n "$APP_FQDN" ]; then
+          APP_URL="https://$APP_FQDN"
+          echo "app-url=$APP_URL" >> $GITHUB_OUTPUT
+          echo "APP_URL=$APP_URL" >> $GITHUB_ENV
+        fi
+        
+        # Get resource group details
+        RG_INFO=$(az group show --name ${{ env.RESOURCE_GROUP }} --query '{location:location, id:id}' --output json)
+        echo "rg-info=$RG_INFO" >> $GITHUB_OUTPUT
+
+    - name: Perform health check
+      if: env.APP_URL
+      run: |
+        echo "Performing health check on: ${{ env.APP_URL }}"
+        
+        MAX_ATTEMPTS=15
+        ATTEMPT=1
+        
+        while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+          echo "Health check attempt $ATTEMPT/$MAX_ATTEMPTS"
+          
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${{ env.APP_URL }}" || echo "000")
+          
+          if [ "$HTTP_STATUS" = "200" ]; then
+            echo "✅ Health check passed - Application is responding"
+            break
+          else
+            echo "⚠️ Health check attempt $ATTEMPT failed - HTTP $HTTP_STATUS"
+            if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
+              echo "❌ Health check failed after $MAX_ATTEMPTS attempts"
+              echo "This may indicate the application is not ready or there's a configuration issue"
+              # Don't fail the deployment, just warn
+            fi
+            sleep 30
+          fi
+          
+          ATTEMPT=$((ATTEMPT + 1))
+        done
+
+    - name: Clean up temporary files
+      if: always()
+      run: |
+        rm -f "./infra/${{ github.event.inputs.environment }}.ca.parameters.temp.jsonc"
+
+  # Job 4: Generate deployment report
+  generate-report:
+    runs-on: ubuntu-latest
+    needs: [build-container, deploy-infrastructure, deploy-application]
+    if: always()
+    
+    steps:
+    - name: Generate comprehensive deployment report
+      run: |
+        echo "# 🚀 Full Deployment Pipeline Report" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Environment:** \`${{ github.event.inputs.environment }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "**Triggered by:** ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Deployment ID:** \`${{ github.run_number }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Build status
+        if [ "${{ needs.build-container.result }}" = "success" ]; then
+          echo "✅ **Container Build:** Completed successfully" >> $GITHUB_STEP_SUMMARY
+          echo "   - Image tag: \`${{ needs.build-container.outputs.image-tag }}\`" >> $GITHUB_STEP_SUMMARY
+        elif [ "${{ github.event.inputs.custom_image_tag }}" ]; then
+          echo "⏭️ **Container Build:** Skipped (using custom tag: \`${{ github.event.inputs.custom_image_tag }}\`)" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ **Container Build:** Failed" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        # Infrastructure status
+        if [ "${{ needs.deploy-infrastructure.result }}" = "success" ]; then
+          echo "✅ **Infrastructure Deployment:** Completed successfully" >> $GITHUB_STEP_SUMMARY
+          echo "   - Resource Group: \`${{ needs.deploy-infrastructure.outputs.resource-group }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "   - ACR: \`${{ needs.deploy-infrastructure.outputs.acr-name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "   - Container App Environment: \`${{ needs.deploy-infrastructure.outputs.cae-name }}\`" >> $GITHUB_STEP_SUMMARY
+        elif [ "${{ github.event.inputs.skip_infrastructure }}" = "true" ]; then
+          echo "⏭️ **Infrastructure Deployment:** Skipped by user" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ **Infrastructure Deployment:** Failed" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        # Application status
+        if [ "${{ needs.deploy-application.result }}" = "success" ]; then
+          echo "✅ **Application Deployment:** Completed successfully" >> $GITHUB_STEP_SUMMARY
+          if [ -n "${{ needs.deploy-application.outputs.app-url }}" ]; then
+            echo "   - **Application URL:** [${{ needs.deploy-application.outputs.app-url }}](${{ needs.deploy-application.outputs.app-url }})" >> $GITHUB_STEP_SUMMARY
+          fi
+        else
+          echo "❌ **Application Deployment:** Failed" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "---" >> $GITHUB_STEP_SUMMARY
+        echo "*Deployment completed at $(date -u)*" >> $GITHUB_STEP_SUMMARY

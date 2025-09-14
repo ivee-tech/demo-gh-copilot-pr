@@ -1,0 +1,227 @@
+name: Deploy Infrastructure and Application
+
+on:
+  # push:
+  #   branches: [main]
+  # pull_request:
+  #   branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+
+env:
+  AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  RESOURCE_GROUP_NAME: rg-ghcopilot-${{ github.event.inputs.environment || 'dev' }}-001
+  LOCATION: australiaeast
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      image-digest: ${{ steps.build.outputs.digest }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to Azure
+      uses: azure/login@v2
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    - name: Log in to Azure Container Registry
+      run: |
+        az acr login --name crghcopilotdev001
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: crghcopilotdev001.azurecr.io/planets-app
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - name: Build and push Docker image
+      id: build
+      uses: docker/build-push-action@v5
+      with:
+        context: ./planets
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  deploy-infrastructure:
+    runs-on: ubuntu-latest
+    needs: build
+    outputs:
+      acr-name: ${{ steps.deploy-acr.outputs.acrName }}
+      ca-environment: ${{ steps.deploy-cae.outputs.envName }}
+      identity-name: ${{ steps.deploy-identity.outputs.identityName }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Log in to Azure
+      uses: azure/login@v2
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    - name: Create Resource Group
+      run: |
+        az group create \
+          --name ${{ env.RESOURCE_GROUP_NAME }} \
+          --location ${{ env.LOCATION }}
+
+    - name: Deploy User Assigned Identity
+      id: deploy-identity
+      run: |
+        az deployment group create \
+          --resource-group ${{ env.RESOURCE_GROUP_NAME }} \
+          --template-file ./infra/deploy-identity.bicep \
+          --parameters @./infra/dev.identity.parameters.jsonc \
+          --name identity-deployment-${{ github.run_number }}
+        
+        # Get the identity name for output
+        IDENTITY_NAME=$(az deployment group show \
+          --resource-group ${{ env.RESOURCE_GROUP_NAME }} \
+          --name identity-deployment-${{ github.run_number }} \
+          --query 'properties.outputs.identityName.value' \
+          --output tsv)
+        echo "identityName=$IDENTITY_NAME" >> $GITHUB_OUTPUT
+
+    - name: Deploy Azure Container Registry
+      id: deploy-acr
+      run: |
+        az deployment group create \
+          --resource-group ${{ env.RESOURCE_GROUP_NAME }} \
+          --template-file ./infra/deploy-acr.bicep \
+          --parameters @./infra/dev.acr.parameters.jsonc \
+          --name acr-deployment-${{ github.run_number }}
+        
+        # Get the ACR name for output
+        ACR_NAME=$(az deployment group show \
+          --resource-group ${{ env.RESOURCE_GROUP_NAME }} \
+          --name acr-deployment-${{ github.run_number }} \
+          --query 'properties.outputs.acrName.value' \
+          --output tsv)
+        echo "acrName=$ACR_NAME" >> $GITHUB_OUTPUT
+
+    - name: Assign ACR Pull role to Identity
+      run: |
+        # Get the identity principal ID
+        IDENTITY_PRINCIPAL_ID=$(az identity show \
+          --resource-group ${{ env.RESOURCE_GROUP_NAME }} \
+          --name ${{ steps.deploy-identity.outputs.identityName }} \
+          --query 'principalId' \
+          --output tsv)
+        
+        # Get the ACR resource ID
+        ACR_RESOURCE_ID=$(az acr show \
+          --name ${{ steps.deploy-acr.outputs.acrName }} \
+          --resource-group ${{ env.RESOURCE_GROUP_NAME }} \
+          --query 'id' \
+          --output tsv)
+        
+        # Assign AcrPull role
+        az role assignment create \
+          --assignee $IDENTITY_PRINCIPAL_ID \
+          --role "AcrPull" \
+          --scope $ACR_RESOURCE_ID
+
+    - name: Deploy Container App Environment
+      id: deploy-cae
+      run: |
+        az deployment group create \
+          --resource-group ${{ env.RESOURCE_GROUP_NAME }} \
+          --template-file ./infra/deploy-cae.bicep \
+          --parameters @./infra/dev.cae.parameters.jsonc \
+          --name cae-deployment-${{ github.run_number }}
+        
+        # Get the environment name for output
+        ENV_NAME=$(az deployment group show \
+          --resource-group ${{ env.RESOURCE_GROUP_NAME }} \
+          --name cae-deployment-${{ github.run_number }} \
+          --query 'properties.outputs.name.value' \
+          --output tsv)
+        echo "envName=$ENV_NAME" >> $GITHUB_OUTPUT
+
+  deploy-application:
+    runs-on: ubuntu-latest
+    needs: [build, deploy-infrastructure]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Log in to Azure
+      uses: azure/login@v2
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    - name: Update Container App parameters with new image
+      run: |
+        # Extract image tag from build output
+        IMAGE_TAG=$(echo "${{ needs.build.outputs.image-tag }}" | grep -o 'main-[a-f0-9]\{7\}' | head -1)
+        if [ -z "$IMAGE_TAG" ]; then
+          IMAGE_TAG="latest"
+        fi
+        
+        # Create temporary parameters file with updated image tag
+        jq --arg tag "$IMAGE_TAG" '.parameters.imageTag.value = $tag' \
+          ./infra/dev.ca.parameters.jsonc > ./infra/dev.ca.parameters.temp.jsonc
+
+    - name: Deploy Container App
+      run: |
+        az deployment group create \
+          --resource-group ${{ env.RESOURCE_GROUP_NAME }} \
+          --template-file ./infra/deploy-ca.bicep \
+          --parameters @./infra/dev.ca.parameters.temp.jsonc \
+          --name ca-deployment-${{ github.run_number }}
+
+    - name: Get Container App URL
+      id: get-url
+      run: |
+        CA_FQDN=$(az deployment group show \
+          --resource-group ${{ env.RESOURCE_GROUP_NAME }} \
+          --name ca-deployment-${{ github.run_number }} \
+          --query 'properties.outputs.fqdn.value' \
+          --output tsv 2>/dev/null || echo "")
+        
+        if [ -n "$CA_FQDN" ]; then
+          echo "app-url=https://$CA_FQDN" >> $GITHUB_OUTPUT
+          echo "### 🚀 Deployment Complete!" >> $GITHUB_STEP_SUMMARY
+          echo "Application URL: https://$CA_FQDN" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "### 🚀 Deployment Complete!" >> $GITHUB_STEP_SUMMARY
+          echo "Container App deployed successfully" >> $GITHUB_STEP_SUMMARY
+        fi
+
+    - name: Clean up temporary files
+      run: |
+        rm -f ./infra/dev.ca.parameters.temp.jsonc
