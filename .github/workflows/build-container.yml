@@ -1,6 +1,12 @@
 name: Build and Push Container Image
 
 on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Custom image tag'
+        required: false
+        default: ''
   # push:
   #   branches: [main, develop]
   #   paths:
@@ -9,12 +15,6 @@ on:
   #   branches: [main]
   #   paths:
   #     - 'planets/**'
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Custom image tag'
-        required: false
-        default: ''
 
 env:
   REGISTRY: crghcopilotdev001.azurecr.io
