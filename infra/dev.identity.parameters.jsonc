@@ -3,7 +3,7 @@
   "contentVersion": "1.0.0.0",
   "parameters": {
     "identityName": {
-      "value": "ua-id-af65"
+      "value": "ua-id-ghcopilot-dev-001"
     },
     "location": {
       "value": "australiaeast"

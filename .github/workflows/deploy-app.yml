@@ -49,7 +49,7 @@ jobs:
         echo "ENVIRONMENT=$ENV_NAME" >> $GITHUB_ENV
         echo "RESOURCE_GROUP_NAME=rg-ghcopilot-$ENV_NAME-001" >> $GITHUB_ENV
         echo "CONTAINER_APP_NAME=ca-ghcopilot-$ENV_NAME-001" >> $GITHUB_ENV
-        echo "ACR_NAME=crghcopilotdev001" >> $GITHUB_ENV
+        echo "ACR_NAME=crghcopilotdev002" >> $GITHUB_ENV
         
         # Determine image tag
         if [ -n "${{ github.event.inputs.image_tag }}" ]; then

@@ -4,7 +4,7 @@ param location string = resourceGroup().location
 param acrName string
 param imageName string
 param imageTag string
-param userAssignedIdentityName string = 'ua-id-af65'
+param userAssignedIdentityName string
 
 var environmentResourceId = resourceId('Microsoft.App/managedEnvironments', envName)
 var userAssignedResourceId = resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', userAssignedIdentityName)

@@ -12,7 +12,7 @@
       "value": "australiaeast"
     },
     "acrName": {
-      "value": "crghcopilotdev001"
+      "value": "crghcopilotdev002"
     },
     "imageName": {
       "value": "planets-app"
@@ -21,7 +21,7 @@
       "value": "latest"
     },
     "userAssignedIdentityName": {
-      "value": "ua-id-af65"
+      "value": "ua-id-ghcopilot-dev-001"
     }
   }
 }

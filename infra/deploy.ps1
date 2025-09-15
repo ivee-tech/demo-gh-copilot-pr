@@ -37,22 +37,22 @@ $resourceNames = @()
 
 switch ($Template) {
     'acr' {
-        $resourceNames += @{ Name = $resourceParams.acrName.value; Type = 'containerRegistry'; Workload = $Workload; Environment = $Environment; Instance = '001' }
+        $resourceNames += @{ Name = $resourceParams.acrName.value; Type = 'containerRegistry'; Workload = $Workload; Environment = $Environment }
     }
     'cae' {
-        $resourceNames += @{ Name = $resourceParams.envName.value; Type = 'containerAppEnvironment'; Workload = $Workload; Environment = $Environment; Instance = '001' }
+        $resourceNames += @{ Name = $resourceParams.envName.value; Type = 'containerAppEnvironment'; Workload = $Workload; Environment = $Environment }
     }
     'ca' {
-        $resourceNames += @{ Name = $resourceParams.caName.value; Type = 'containerApp'; Workload = $Workload; Environment = $Environment; Instance = '001' }
-        $resourceNames += @{ Name = $resourceParams.envName.value; Type = 'containerAppEnvironment'; Workload = $Workload; Environment = $Environment; Instance = '001' }
+        $resourceNames += @{ Name = $resourceParams.caName.value; Type = 'containerApp'; Workload = $Workload; Environment = $Environment }
+        $resourceNames += @{ Name = $resourceParams.envName.value; Type = 'containerAppEnvironment'; Workload = $Workload; Environment = $Environment }
     }
     'identity' {
-        $resourceNames += @{ Name = $resourceParams.identityName.value; Type = 'userAssignedIdentity'; Workload = $Workload; Environment = $Environment; Instance = 'af65' }
+        $resourceNames += @{ Name = $resourceParams.identityName.value; Type = 'userAssignedIdentity'; Workload = $Workload; Environment = $Environment }
     }
 }
 
 # Always validate resource group name
-$resourceNames += @{ Name = $ResourceGroupName; Type = 'resourceGroup'; Workload = $Workload; Environment = $Environment; Instance = '001' }
+$resourceNames += @{ Name = $ResourceGroupName; Type = 'resourceGroup'; Workload = $Workload; Environment = $Environment }
 
 # Validate resource names
 $validatorPath = Join-Path $PSScriptRoot 'azureResourceNameValidator.ps1'
@@ -60,7 +60,7 @@ $validatorPath = Join-Path $PSScriptRoot 'azureResourceNameValidator.ps1'
 $resourceNames | ForEach-Object {
     $res = $_
     Write-Host "Validating $($res.Type) name: $($res.Name) ..."
-    & $validatorPath -Name $res.Name -Type $res.Type -Workload $res.Workload -Environment $res.Environment -Instance $res.Instance
+    & $validatorPath -Name $res.Name -Type $res.Type -Workload $res.Workload -Environment $res.Environment
     if ($LASTEXITCODE -ne 0) {
         Write-Error "$($res.Type) name validation failed for $($res.Name)."
         exit 2

@@ -6,14 +6,13 @@ Validates Azure resource names against best practices.
 Checks abbreviation, pattern, and length for resource names.
 
 .EXAMPLE
-./azureResourceNameValidator.ps1 -Name "acr-demo-dev-01" -Type "containerRegistry" -Workload "demo" -Environment "dev" -Instance "01"
+./azureResourceNameValidator.ps1 -Name "acr-demo-dev-001" -Type "containerRegistry" -Workload "demo" -Environment "dev"
 #>
 param(
     [Parameter(Mandatory)] [string]$Name,
     [Parameter(Mandatory)] [string]$Type,
     [Parameter(Mandatory)] [string]$Workload,
-    [Parameter(Mandatory)] [string]$Environment,
-    [Parameter(Mandatory)] [string]$Instance
+    [Parameter(Mandatory)] [string]$Environment
 )
 
 $abbreviations = @{
@@ -58,10 +57,10 @@ $maxLength = $lengthLimits[$Type]
 $abbr = $abbreviations[$Type]
 
 if ($concatTypes -contains $Type) {
-    # Pattern: <type><workload><environment><instance>
-    $expected = "$abbr$Workload$Environment$Instance"
-    if ($Name -ne $expected) {
-        Write-Error "$Name - should follow pattern: $expected"
+    # Pattern: <type><workload><environment><3-digit-instance>
+    $expectedPattern = "^$abbr$Workload$Environment([0-9]{3})$"
+    if ($Name -notmatch $expectedPattern) {
+        Write-Error "$Name - should follow pattern: $abbr$Workload$Environment{3-digit-number}"
         exit 2
     }
     if ($Name -notmatch $patternConcat) {
@@ -69,10 +68,10 @@ if ($concatTypes -contains $Type) {
         exit 2
     }
 } else {
-    # Pattern: <type>-<workload>-<environment>-<instance>
-    $expected = "$abbr-$Workload-$Environment-$Instance"
-    if ($Name -ne $expected) {
-        Write-Error "$Name - name should follow pattern: $expected"
+    # Pattern: <type>-<workload>-<environment>-<3-digit-instance>
+    $expectedPattern = "^$abbr-$Workload-$Environment-([0-9]{3})$"
+    if ($Name -notmatch $expectedPattern) {
+        Write-Error "$Name - name should follow pattern: $abbr-$Workload-$Environment-{3-digit-number}"
         exit 2
     }
     if ($Name -notmatch $patternDash) {

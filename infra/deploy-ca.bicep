@@ -5,7 +5,7 @@ param location string = resourceGroup().location
 param acrName string
 param imageName string
 param imageTag string
-param userAssignedIdentityName string = 'ua-id-af65'
+param userAssignedIdentityName string
 
 module ca 'modules/ca.bicep' = {
   name: 'caDeployment'

@@ -47,8 +47,8 @@ The deployment script now supports deploying individual components using specifi
 
 The script validates resource names against Azure naming conventions using the `azureResourceNameValidator.ps1` script. Names follow the pattern:
 
-- User-Assigned Identity: `ua-id-<workload>-<environment>-<instance>` (e.g., ua-id-af65)
-- Container Registry: `cr<workload><environment><instance>` (e.g., crghcopilotdev001)
+- User-Assigned Identity: `ua-id-<workload>-<environment>-<instance>` (e.g., ua-id-ghcopilot-dev-001)
+- Container Registry: `cr<workload><environment><instance>` (e.g., crghcopilotdev002)
 - Container App Environment: `cae-<workload>-<environment>-<instance>` (e.g., cae-gh-copilot-dev-001)
 - Container App: `ca-<workload>-<environment>-<instance>` (e.g., ca-gh-copilot-dev-001)
 

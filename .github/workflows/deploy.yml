@@ -47,13 +47,13 @@ jobs:
 
     - name: Log in to Azure Container Registry
       run: |
-        az acr login --name crghcopilotdev001
+        az acr login --name crghcopilotdev002
 
     - name: Extract metadata
       id: meta
       uses: docker/metadata-action@v5
       with:
-        images: crghcopilotdev001.azurecr.io/planets-app
+        images: crghcopilotdev002.azurecr.io/planets-app
         tags: |
           type=ref,event=branch
           type=ref,event=pr

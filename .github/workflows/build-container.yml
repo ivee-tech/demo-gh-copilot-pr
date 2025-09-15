@@ -17,7 +17,7 @@ on:
   #     - 'planets/**'
 
 env:
-  REGISTRY: crghcopilotdev001.azurecr.io
+  REGISTRY: crghcopilotdev002.azurecr.io
   IMAGE_NAME: planets-app
 
 jobs:
