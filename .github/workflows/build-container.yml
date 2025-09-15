@@ -7,14 +7,14 @@ on:
         description: 'Custom image tag'
         required: false
         default: ''
-  # push:
-  #   branches: [main, develop]
-  #   paths:
-  #     - 'planets/**'
-  # pull_request:
-  #   branches: [main]
-  #   paths:
-  #     - 'planets/**'
+  push:
+    branches: [main, develop]
+    paths:
+      - 'planets/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'planets/**'
 
 env:
   REGISTRY: crghcopilotdev002.azurecr.io
