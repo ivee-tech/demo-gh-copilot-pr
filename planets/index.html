@@ -22,7 +22,6 @@
     <script>
         // Setup scene, camera, and renderer
         const scene = new THREE.Scene();
-        scene.background = new THREE.Color(0x0000ff); // Set background to blue
         const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
         const renderer = new THREE.WebGLRenderer();
         renderer.setSize(window.innerWidth, window.innerHeight);
@@ -81,33 +80,6 @@
             scene.add(mesh);
             planet.mesh = mesh;
 
-            // Add rings for Saturn
-            if (planet.name === 'Saturn') {
-                // Load Saturn's ring texture
-                const ringTexture = textureLoader.load('assets/saturn-rings.jpg');
-                
-                // Create ring geometry - rings extend from 1.2 to 2.2 times Saturn's radius
-                const ringInnerRadius = planet.size * 1.2;
-                const ringOuterRadius = planet.size * 2.2;
-                const ringGeometry = new THREE.RingGeometry(ringInnerRadius, ringOuterRadius, 64);
-                
-                // Create ring material with transparency
-                const ringMaterial = new THREE.MeshStandardMaterial({
-                    map: ringTexture,
-                    side: THREE.DoubleSide,
-                    transparent: true,
-                    opacity: 0.8
-                });
-                
-                // Create ring mesh and position it
-                const ringMesh = new THREE.Mesh(ringGeometry, ringMaterial);
-                ringMesh.rotation.x = Math.PI / 2; // Rotate to be horizontal
-                scene.add(ringMesh);
-                
-                // Store ring mesh reference for animation
-                planet.rings = ringMesh;
-            }
-
             // Create orbit path
             const orbitGeometry = new THREE.RingGeometry(planet.distance - 0.1, planet.distance + 0.1, 64);
             const orbitMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide });
@@ -129,13 +101,6 @@
                 const angle = time * planet.speed;
                 planet.mesh.position.x = planet.distance * Math.cos(angle);
                 planet.mesh.position.z = planet.distance * Math.sin(angle);
-                
-                // Update Saturn's rings position and rotation
-                if (planet.rings) {
-                    planet.rings.position.x = planet.mesh.position.x;
-                    planet.rings.position.z = planet.mesh.position.z;
-                    planet.rings.rotation.z += planet.rotationSpeed; // Rotate rings with Saturn
-                }
             });
             controls.update();
             renderer.render(scene, camera);
