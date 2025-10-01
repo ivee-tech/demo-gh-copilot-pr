@@ -64,30 +64,10 @@
             { name: 'Earth', size: 1, distance: 15, speed: 0.02, rotationSpeed: 0.008, texture: 'assets/earth.jpg' },
             { name: 'Mars', size: 0.532, distance: 22.79, speed: 0.016, rotationSpeed: 0.012, texture: 'assets/mars.jpg' },
             { name: 'Jupiter', size: 11.21, distance: 77.78, speed: 0.004, rotationSpeed: 0.014, texture: 'assets/jupiter.jpg' },
-            { name: 'Saturn', size: 9.45, distance: 143.37, speed: 0.002, rotationSpeed: 0.016, texture: 'assets/saturn.jpg', hasRings: true },
+            { name: 'Saturn', size: 9.45, distance: 143.37, speed: 0.002, rotationSpeed: 0.016, texture: 'assets/saturn.jpg' },
             { name: 'Uranus', size: 4.01, distance: 287.1, speed: 0.0008, rotationSpeed: 0.018, texture: 'assets/uranus.jpg' },
             { name: 'Neptune', size: 3.88, distance: 449.5, speed: 0.0004, rotationSpeed: 0.02, texture: 'assets/neptune.jpg' }
         ];
-
-        // Helper function to create rings for planets (Saturn)
-        function createPlanetRings(planetSize, ringTexturePath) {
-            const ringTexture = textureLoader.load(ringTexturePath);
-            const innerRadius = planetSize * 1.2;
-            const outerRadius = planetSize * 2.3;
-            const ringGeometry = new THREE.RingGeometry(innerRadius, outerRadius, 128, 1);
-            const ringMaterial = new THREE.MeshBasicMaterial({
-                map: ringTexture,
-                side: THREE.DoubleSide,
-                transparent: true,
-                opacity: 0.8,
-                depthWrite: false,
-                alphaTest: 0.02
-            });
-            const ringMesh = new THREE.Mesh(ringGeometry, ringMaterial);
-            ringMesh.rotation.x = Math.PI / 2;
-            return ringMesh;
-        }
-
         // Load textures and create planets and orbits
         planets.forEach(planet => {
             // Load texture
@@ -97,24 +77,8 @@
             const geometry = new THREE.SphereGeometry(planet.size, 32, 32);
             const material = new THREE.MeshStandardMaterial({ map: texture });
             const mesh = new THREE.Mesh(geometry, material);
-
-            // For Saturn, create a group with planet and rings with axial tilt
-            if (planet.hasRings) {
-                const saturnGroup = new THREE.Group();
-                saturnGroup.add(mesh);
-                
-                const rings = createPlanetRings(planet.size, 'assets/saturn-rings.jpg');
-                saturnGroup.add(rings);
-                
-                saturnGroup.rotation.z = 26.7 * (Math.PI / 180);
-                
-                scene.add(saturnGroup);
-                planet.mesh = saturnGroup;
-                planet.planetMesh = mesh;
-            } else {
-                scene.add(mesh);
-                planet.mesh = mesh;
-            }
+            scene.add(mesh);
+            planet.mesh = mesh;
 
             // Create orbit path
             const orbitGeometry = new THREE.RingGeometry(planet.distance - 0.1, planet.distance + 0.1, 64);
@@ -131,13 +95,9 @@
         // Animation loop
         function animate() {
             requestAnimationFrame(animate);
-            const time = Date.now() * 0.0002;
+            const time = Date.now() * 0.0002; // Increase the speed of the orbits
             planets.forEach(planet => {
-                if (planet.planetMesh) {
-                    planet.planetMesh.rotation.y += planet.rotationSpeed;
-                } else {
-                    planet.mesh.rotation.y += planet.rotationSpeed;
-                }
+                planet.mesh.rotation.y += planet.rotationSpeed; // Rotate each planet with different speeds
                 const angle = time * planet.speed;
                 planet.mesh.position.x = planet.distance * Math.cos(angle);
                 planet.mesh.position.z = planet.distance * Math.sin(angle);
