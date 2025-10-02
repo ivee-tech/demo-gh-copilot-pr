@@ -64,7 +64,7 @@
             { name: 'Earth', size: 1, distance: 15, speed: 0.02, rotationSpeed: 0.008, texture: 'assets/earth.jpg' },
             { name: 'Mars', size: 0.532, distance: 22.79, speed: 0.016, rotationSpeed: 0.012, texture: 'assets/mars.jpg' },
             { name: 'Jupiter', size: 11.21, distance: 77.78, speed: 0.004, rotationSpeed: 0.014, texture: 'assets/jupiter.jpg' },
-            { name: 'Saturn', size: 9.45, distance: 143.37, speed: 0.002, rotationSpeed: 0.016, texture: 'assets/saturn.jpg' },
+            { name: 'Saturn', size: 9.45, distance: 143.37, speed: 0.002, rotationSpeed: 0.016, texture: 'assets/saturn.jpg', hasRings: true },
             { name: 'Uranus', size: 4.01, distance: 287.1, speed: 0.0008, rotationSpeed: 0.018, texture: 'assets/uranus.jpg' },
             { name: 'Neptune', size: 3.88, distance: 449.5, speed: 0.0004, rotationSpeed: 0.02, texture: 'assets/neptune.jpg' }
         ];
@@ -79,6 +79,40 @@
             const mesh = new THREE.Mesh(geometry, material);
             scene.add(mesh);
             planet.mesh = mesh;
+
+            // Create Saturn rings if applicable
+            if (planet.hasRings) {
+                // Ring scale factors: inner ~1.2x planet radius, outer ~2.3x planet radius
+                const ringInner = planet.size * 1.2;
+                const ringOuter = planet.size * 2.3;
+
+                // Load ring texture
+                const ringTexture = textureLoader.load('assets/saturn-rings.jpg', (tex) => {
+                    if ('colorSpace' in tex) {
+                        tex.colorSpace = THREE.SRGBColorSpace;
+                    }
+                });
+
+                // Create ring material with transparency
+                const ringMaterial = new THREE.MeshBasicMaterial({
+                    map: ringTexture,
+                    transparent: true,
+                    opacity: 0.8,
+                    alphaTest: 0.02,
+                    side: THREE.DoubleSide,
+                    depthWrite: false
+                });
+
+                // Create ring geometry with 128 segments for smooth appearance
+                const ringGeometry = new THREE.RingGeometry(ringInner, ringOuter, 128, 1);
+                const ringMesh = new THREE.Mesh(ringGeometry, ringMaterial);
+                
+                // Apply Saturn's axial tilt (26.7 degrees)
+                ringMesh.rotation.x = THREE.MathUtils.degToRad(26.7);
+                
+                scene.add(ringMesh);
+                planet.ringMesh = ringMesh;
+            }
 
             // Create orbit path
             const orbitGeometry = new THREE.RingGeometry(planet.distance - 0.1, planet.distance + 0.1, 64);
@@ -101,6 +135,12 @@
                 const angle = time * planet.speed;
                 planet.mesh.position.x = planet.distance * Math.cos(angle);
                 planet.mesh.position.z = planet.distance * Math.sin(angle);
+                
+                // Update ring position to follow Saturn
+                if (planet.ringMesh) {
+                    planet.ringMesh.position.copy(planet.mesh.position);
+                    planet.ringMesh.rotation.y = planet.mesh.rotation.y;
+                }
             });
             controls.update();
             renderer.render(scene, camera);
